@@ -3,6 +3,7 @@ package dev.istvanjuhos.mediaprojectiondemo
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
@@ -94,7 +95,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun launchProjectionConsent() {
-        projectionConsentLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            projectionConsentLauncher.launch(
+                mediaProjectionManager.createScreenCaptureIntent(
+//                    MediaProjectionConfig.createConfigForUserChoice()
+                )
+            )
+        } else {
+            projectionConsentLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
+        }
     }
 
     private fun startProjectionService(resultCode: Int, data: Intent) {
