@@ -3,6 +3,7 @@ package dev.istvanjuhos.mediaprojectiondemo
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -34,6 +35,10 @@ class MainActivity : ComponentActivity() {
 
     private var isProjecting by mutableStateOf(false)
     private var targetSurface: Surface? = null
+    // Track whether a projection session has ever started in this process
+    private var hasEverProjected: Boolean = false
+    // Ensure we paint the initial white only once before the first session
+    private var didPaintInitialWhite: Boolean = false
 
     private val mediaProjectionManager: MediaProjectionManager by lazy {
         getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -53,6 +58,7 @@ class MainActivity : ComponentActivity() {
         if (result.resultCode == RESULT_OK && result.data != null) {
             startProjectionService(result.resultCode, result.data!!)
             isProjecting = true
+            hasEverProjected = true
             // Send current surface if created after service starts
             targetSurface?.let { sendUpdateSurface(it) }
         }
@@ -69,6 +75,10 @@ class MainActivity : ComponentActivity() {
                     onStop = { stopProjection() },
                     onSurfaceReady = { surface ->
                         targetSurface = surface
+                        if (!hasEverProjected && !didPaintInitialWhite) {
+                            paintSurfaceWhite(surface)
+                            didPaintInitialWhite = true
+                        }
                         if (isProjecting) {
                             sendUpdateSurface(surface)
                         }
@@ -78,6 +88,20 @@ class MainActivity : ComponentActivity() {
                     }
                 )
             }
+        }
+    }
+
+    private fun paintSurfaceWhite(surface: Surface) {
+        try {
+            if (!surface.isValid) return
+            val canvas = surface.lockCanvas(null)
+            try {
+                canvas.drawColor(Color.WHITE)
+            } finally {
+                surface.unlockCanvasAndPost(canvas)
+            }
+        } catch (_: Throwable) {
+            // Ignore drawing failures; surface may be in transition
         }
     }
 
