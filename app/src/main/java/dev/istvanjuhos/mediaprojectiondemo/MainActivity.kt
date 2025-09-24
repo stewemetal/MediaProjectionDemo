@@ -44,10 +44,11 @@ class MainActivity : ComponentActivity() {
         getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
     }
 
-    private val requestNotifPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
+    private val requestPermissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        val allGranted = result.values.all { it }
+        if (allGranted) {
             launchProjectionConsent()
         }
     }
@@ -106,14 +107,19 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startProjection() {
+        val requiredPermissions = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= 33) {
-            val permission = Manifest.permission.POST_NOTIFICATIONS
-            val granted = ContextCompat.checkSelfPermission(this, permission) ==
-                    android.content.pm.PackageManager.PERMISSION_GRANTED
-            if (!granted) {
-                requestNotifPermissionLauncher.launch(permission)
-                return
-            }
+            requiredPermissions += Manifest.permission.POST_NOTIFICATIONS
+        }
+        // Needed for AudioPlaybackCapture (device audio capture)
+        requiredPermissions += Manifest.permission.RECORD_AUDIO
+
+        val toRequest = requiredPermissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+        if (toRequest.isNotEmpty()) {
+            requestPermissionsLauncher.launch(toRequest.toTypedArray())
+            return
         }
         launchProjectionConsent()
     }

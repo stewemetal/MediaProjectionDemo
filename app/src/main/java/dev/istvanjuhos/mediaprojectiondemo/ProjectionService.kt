@@ -8,6 +8,10 @@ import android.content.Context
 import android.content.Intent
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioPlaybackCaptureConfiguration
+import android.media.AudioRecord
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -27,6 +31,11 @@ class ProjectionService : Service() {
     private var targetSurface: Surface? = null
     private var callbackRegistered: Boolean = false
 
+    // Audio capture (device audio) via AudioPlaybackCapture (API 29+)
+    private var audioRecord: AudioRecord? = null
+    @Volatile private var audioRunning: Boolean = false
+    private var audioThread: Thread? = null
+
     private val mediaProjectionManager: MediaProjectionManager by lazy {
         getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
     }
@@ -34,7 +43,8 @@ class ProjectionService : Service() {
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
             // MediaProjection was stopped by the system or user.
-            // Release the virtual display and stop the service.
+            // Release audio and virtual display and stop the service.
+            stopAudioCapture()
             virtualDisplay?.release()
             virtualDisplay = null
             // Unregister to avoid leaks; guard by flag and instance
@@ -86,6 +96,8 @@ class ProjectionService : Service() {
         if (targetSurface != null) {
             createOrUpdateVirtualDisplay()
         }
+        // Start device audio capture if supported
+        startAudioCaptureIfPossible()
     }
 
     private fun handleUpdateSurface(intent: Intent) {
@@ -137,7 +149,79 @@ class ProjectionService : Service() {
         }
     }
 
+    private fun startAudioCaptureIfPossible() {
+        if (Build.VERSION.SDK_INT < 29) return
+        val mp = mediaProjection ?: return
+        if (audioRecord != null) return
+        // Ensure RECORD_AUDIO permission is granted; otherwise, skip starting audio capture
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
+        try {
+            val config = AudioPlaybackCaptureConfiguration.Builder(mp)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                .build()
+
+            val sampleRate = 48000
+            val channelMask = AudioFormat.CHANNEL_IN_STEREO
+            val encoding = AudioFormat.ENCODING_PCM_16BIT
+            val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelMask, encoding)
+            val bufferSize = if (minBuf > 0) (minBuf * 2) else 8192
+
+            val record = AudioRecord.Builder()
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(encoding)
+                        .setSampleRate(sampleRate)
+                        .setChannelMask(channelMask)
+                        .build()
+                )
+                .setBufferSizeInBytes(bufferSize)
+                .setAudioPlaybackCaptureConfig(config)
+                .build()
+
+            record.startRecording()
+            audioRecord = record
+            audioRunning = true
+            audioThread = Thread({
+                val buf = ByteArray(bufferSize)
+                while (audioRunning) {
+                    try {
+                        val read = record.read(buf, 0, buf.size)
+                        if (read <= 0) {
+                            // If error or end, break
+                            if (read < 0) break
+                        }
+                        // Discard captured audio; in a real app, process/encode it
+                    } catch (_: Throwable) {
+                        break
+                    }
+                }
+                try { record.stop() } catch (_: Throwable) {}
+                try { record.release() } catch (_: Throwable) {}
+            }, "PlaybackCaptureThread").also { it.start() }
+        } catch (_: Throwable) {
+            // If anything fails (e.g., permission, device restriction), ignore and continue with video only
+            try { audioRecord?.release() } catch (_: Throwable) {}
+            audioRecord = null
+            audioRunning = false
+            audioThread = null
+        }
+    }
+
+    private fun stopAudioCapture() {
+        audioRunning = false
+        audioThread?.interrupt()
+        audioThread = null
+        audioRecord?.let { ar ->
+            try { ar.stop() } catch (_: Throwable) {}
+            try { ar.release() } catch (_: Throwable) {}
+        }
+        audioRecord = null
+    }
+
     private fun stopProjectionAndSelf() {
+        stopAudioCapture()
         virtualDisplay?.release()
         virtualDisplay = null
         mediaProjection?.let { mp ->
@@ -160,6 +244,7 @@ class ProjectionService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        stopAudioCapture()
         virtualDisplay?.release()
         mediaProjection?.stop()
     }
@@ -174,11 +259,19 @@ class ProjectionService : Service() {
             )
             nm.createNotificationChannel(channel)
         }
+
+        // PendingIntent to stop the projection when the notification is tapped
+        val stopIntent = Intent(this, ProjectionService::class.java).apply { action = ACTION_STOP }
+        val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) android.app.PendingIntent.FLAG_IMMUTABLE else 0
+        val stopPendingIntent = android.app.PendingIntent.getService(this, 0, stopIntent, pendingFlags)
+
         val notification: Notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("Screen capture running")
-            .setContentText("Tap Stop in the app to end capture")
+            .setContentText("Tap to stop screen capture")
             .setSmallIcon(android.R.drawable.presence_video_online)
             .setOngoing(true)
+            .setContentIntent(stopPendingIntent)
+            .addAction(0, "Stop", stopPendingIntent)
             .build()
         startForeground(NOTIFICATION_ID, notification)
     }
